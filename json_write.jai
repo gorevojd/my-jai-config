@@ -45,7 +45,8 @@ json_write_string :: (builder: *String_Builder, text: string) -> bool {
             append(builder, "\\u00");
             append(builder, HEX[byte >> 4]);
             append(builder, HEX[byte & 0x0F]);
-        } else {
+        }
+        else {
             append(builder, byte);
         }
     }
@@ -303,11 +304,13 @@ json_write_integer :: (builder: *String_Builder, info: *Type_Info_Integer, sourc
         }
         else if info.runtime_size == 8 {
             value = (cast(*s64)source).*;
-        } else {
+        }
+        else {
             return false;
         }
         print_to_builder(builder, "%", FormatInt.{value = value});
-    } else {
+    }
+    else {
         value: u64;
         if info.runtime_size == 1 {
             value = (cast(*u8)source).*;
@@ -320,7 +323,8 @@ json_write_integer :: (builder: *String_Builder, info: *Type_Info_Integer, sourc
         }
         else if info.runtime_size == 8 {
             value = (cast(*u64)source).*;
-        } else {
+        }
+        else {
             return false;
         }
         print_to_builder(builder, "%", FormatInt.{value = value});

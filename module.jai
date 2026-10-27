@@ -36,6 +36,7 @@ Config_Validation_Callback :: #type (config_type: Type, values: []ConfigValue) -
 
 ConfigManager :: struct {
     configs: [..]*ConfigRegistration;
+    registrations_by_type: Tables.Table(Type, *ConfigRegistration, config_type_hash);
 
     // Defaults to the allocator active at first registration. Keep it alive through shutdown.
     allocator: Allocator;
@@ -72,6 +73,7 @@ register_config :: (manager: *ConfigManager, $T: Type, path: string) -> bool {
     registration.base.populate = TypedConfig(T).populate;
     registration.base.release = TypedConfig(T).release;
     array_add(*manager.configs, *registration.base);
+    Tables.table_add(*manager.registrations_by_type, T, *registration.base);
     return true;
 }
 
@@ -218,6 +220,7 @@ shutdown :: (manager: *ConfigManager) {
         registration.release(registration);
     }
     array_free(manager.configs);
+    Tables.deinit(*manager.registrations_by_type);
     Events.destroy(*manager.config_changed);
     next_subscription_id := manager.config_changed.next_id;
     manager.* = .{};
@@ -454,12 +457,16 @@ release_storage :: (storage: *ConfigStorage($T)) {
 }
 
 find_registration :: (manager: *ConfigManager, config_type: Type) -> *ConfigRegistration {
-    for registration: manager.configs {
-        if registration.config_type == config_type {
-            return registration;
-        }
+    registration := Tables.table_find_pointer(*manager.registrations_by_type, config_type);
+    if registration {
+        return registration.*;
     }
     return null;
+}
+
+config_type_hash :: (config_type: Type) -> u32 {
+    Hash :: #import "Hash";
+    return Hash.get_hash(cast(*Type_Info)config_type);
 }
 
 read_config_file :: (path: string) -> string, bool {

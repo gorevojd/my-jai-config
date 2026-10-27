@@ -27,7 +27,7 @@ Provide the JSON above beside the program's working directory.
 C :: #import "MyConfig";
 E :: #import "MyEvents";
 
-Movement :: struct @ReflectStruct {
+Movement :: struct {
     speed: float = 1.0;
     name: string = "Untitled";
 }
@@ -58,6 +58,8 @@ main :: () {
 The public types are `ConfigManager`, `ConfigEventType`, `ConfigManagerTime`, the
 callback signatures, and `JsonEntry` for custom JSON adapters. Registration
 records, typed storage, dependency imports and implementation helpers are internal.
+Registrations are indexed by exact type identity for lookup; a separate ordered list
+preserves registration order during loading and polling. Shutdown releases both.
 
 - `register_config(*manager, T, path) -> bool` binds a type to one file.
   Duplicate types and empty paths fail. Registration copies the path but performs
@@ -90,7 +92,7 @@ Unkeyed documents are rejected. Applications can require a particular preset usi
 ## Default key
 
 A struct can declare `DEFAULT_KEY :: "Red";`. It must be a string constant; an
-invalid declaration is rejected during compilation. `default_config_key(T)`
+invalid declaration emits a compile-time message and falls back to `"default"`. `default_config_key(T)`
 returns this value, or `"default"` for types without the constant.
 Omitted-key lookups and empty-file initialization use this key. Explicit keys are
 unchanged, and the constant is not serialized as a field. Registration only binds
@@ -98,21 +100,20 @@ the source: missing files and missing default entries are not created on registr
 
 ## Field serialization
 
-Put `@ReflectStruct` after `struct` to generate reflection and include its
-nonconstant fields by default. `@NonSerializeField` excludes a field entirely,
-even if it also has `@SerializeField`. `@SerializeField` is optional and does not
-enable reflection for an unmarked struct. Unmarked types have no reflected fields.
+All typechecked structs generate reflection and include their nonconstant fields
+by default. `@NonSerializeField` excludes a field entirely, even if it also has
+`@SerializeField`. `@SerializeField` is optional under the default policy.
 Omitting `@SerializeFieldsByDefault` means true, as do the bare marker and `=true`.
 Use `@SerializeFieldsByDefault=false` to require explicit `@SerializeField` notes.
 These choices are precomputed by reflection independently of JSON.
 
 ```jai
-Movement :: struct @ReflectStruct {
+Movement :: struct {
     speed: float = 1.0; @SerializeField
     cached_distance: float; @NonSerializeField
 }
 
-Preferences :: struct @ReflectStruct {
+Preferences :: struct {
     volume: float = 0.8;
     session_id: int; @NonSerializeField
     movement: Movement;

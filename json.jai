@@ -133,7 +133,8 @@ json_space :: (p: *JsonParser) {
             if !closed {
                 p.error = true;
             }
-        } else {
+        }
+        else {
             return;
         }
     }
@@ -179,7 +180,8 @@ json_hex_quad :: (p: *JsonParser) -> u32 {
         }
         else if ch >= #char "A" && ch <= #char "F" {
             result += 10 + cast(u32)(ch - #char "A");
-        } else {
+        }
+        else {
             p.error = true;
             return 0;
         }
@@ -204,7 +206,8 @@ json_append_codepoint :: (builder: *String_Builder, value: u32) {
         bytes[1] = cast(u8)(0x80 | ((value >> 6) & 0x3F));
         bytes[2] = cast(u8)(0x80 | (value & 0x3F));
         count = 3;
-    } else {
+    }
+    else {
         bytes[0] = cast(u8)(0xF0 | (value >> 18));
         bytes[1] = cast(u8)(0x80 | ((value >> 12) & 0x3F));
         bytes[2] = cast(u8)(0x80 | ((value >> 6) & 0x3F));
@@ -231,7 +234,8 @@ json_utf8_tail :: (p: *JsonParser, first: u8) -> bool {
         remaining = 3;
         codepoint = cast(u32)(first & 0x07);
         minimum = 0x10000;
-    } else {
+    }
+    else {
         return false;
     }
     if p.cursor + remaining > p.text.count {
@@ -327,7 +331,8 @@ json_quoted :: (p: *JsonParser, decode: bool = true) -> string {
             else if codepoint >= 0xDC00 && codepoint <= 0xDFFF {
                 p.error = true;
             }
-        } else {
+        }
+        else {
             p.error = true;
         }
         if p.error {
@@ -358,7 +363,8 @@ json_number_token :: (p: *JsonParser) -> string {
     }
     if p.text[p.cursor] == #char "0" {
         p.cursor += 1;
-    } else {
+    }
+    else {
         digits := p.cursor;
         while p.cursor < p.text.count && json_digit(p.text[p.cursor]) {
             p.cursor += 1;
@@ -449,7 +455,8 @@ json_skip_value :: (p: *JsonParser, depth: int) {
     }
     else if ch == #char "n" {
         p.error = !json_literal(p, "null");
-    } else {
+    }
+    else {
         json_number_token(p);
     }
 }
@@ -478,7 +485,8 @@ json_integer_magnitude :: (text: string) -> (magnitude: u64, negative: bool, val
         }
         if ch == #char "0" {
             trailing_zeros += 1;
-        } else {
+        }
+        else {
             trailing_zeros = 0;
             nonzero = true;
         }
@@ -669,7 +677,8 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
         }
         else if json_literal(p, "false") {
             (cast(*bool)dest).* = false;
-        } else {
+        }
+        else {
             p.error = true;
         }
     }
@@ -720,10 +729,12 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
         }
         else if info.runtime_size == size_of(float32) && JsonMath.is_finite(cast(float32)value) {
             (cast(*float32)dest).* = cast(float32)value;
-        } else {
+        }
+        else {
             p.error = true;
         }
-    } else {
+    }
+    else {
         p.error = true;
     }
 }
