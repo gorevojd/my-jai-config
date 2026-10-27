@@ -48,16 +48,19 @@ json_split_configs :: (text: string, entries: *[..]JsonEntry, strings: *[..]stri
     return false;
 }
 
-// Initialize dest to T's defaults before decoding. Unknown fields, duplicate fields,
+// Initialize dest to T's defaults before decoding; release owned containers before reusing dest. Unknown fields, duplicate fields,
 // unsupported types and numeric overflow fail without silently coercing values.
 json_decode :: (text: string, $T: Type, dest: *T, strings: *[..]string) -> bool {
     structures :: #run Reflection.collect_structs(type_info(T));
-    p := JsonParser.{text = text, strings = strings};
+    codecs := container_codecs(T);
+    container_memory(type_info(T), cast(*u8)dest, true, structures, codecs);
+    p := JsonParser.{text = text, strings = strings, codecs = codecs};
     json_read_value(*p, type_info(T), cast(*u8)dest, 0, structures);
     return json_finished(*p);
 }
 
 #scope_module
+
 
 // Blank/comment-only files and empty objects can be initialized without accepting malformed JSON.
 json_is_empty_config :: (text: string) -> bool {
@@ -81,7 +84,7 @@ json_valid_utf8 :: (text: string) -> bool {
     return true;
 }
 
-#scope_file
+#scope_module
 
 JsonMath :: #import "MyMath";
 JSON_MAX_DEPTH :: 64;
@@ -91,6 +94,7 @@ JsonParser :: struct {
     cursor: int;
     error: bool;
     strings: *[..]string;
+    codecs: []ContainerCodec;
 }
 
 json_slice :: (text: string, first: int, last: int) -> string {
@@ -114,7 +118,8 @@ json_space :: (p: *JsonParser) {
                    p.text[p.cursor] != #char "\r") {
                 p.cursor += 1;
             }
-        } else if next == #char "*" {
+        }
+        else if next == #char "*" {
             p.cursor += 2;
             closed: bool;
             while p.cursor + 1 < p.text.count {
@@ -168,9 +173,11 @@ json_hex_quad :: (p: *JsonParser) -> u32 {
         result <<= 4;
         if ch >= #char "0" && ch <= #char "9" {
             result += cast(u32)(ch - #char "0");
-        } else if ch >= #char "a" && ch <= #char "f" {
+        }
+        else if ch >= #char "a" && ch <= #char "f" {
             result += 10 + cast(u32)(ch - #char "a");
-        } else if ch >= #char "A" && ch <= #char "F" {
+        }
+        else if ch >= #char "A" && ch <= #char "F" {
             result += 10 + cast(u32)(ch - #char "A");
         } else {
             p.error = true;
@@ -186,11 +193,13 @@ json_append_codepoint :: (builder: *String_Builder, value: u32) {
     if value < 0x80 {
         bytes[0] = cast(u8)value;
         count = 1;
-    } else if value < 0x800 {
+    }
+    else if value < 0x800 {
         bytes[0] = cast(u8)(0xC0 | (value >> 6));
         bytes[1] = cast(u8)(0x80 | (value & 0x3F));
         count = 2;
-    } else if value < 0x10000 {
+    }
+    else if value < 0x10000 {
         bytes[0] = cast(u8)(0xE0 | (value >> 12));
         bytes[1] = cast(u8)(0x80 | ((value >> 6) & 0x3F));
         bytes[2] = cast(u8)(0x80 | (value & 0x3F));
@@ -212,11 +221,13 @@ json_utf8_tail :: (p: *JsonParser, first: u8) -> bool {
         remaining = 1;
         codepoint = cast(u32)(first & 0x1F);
         minimum = 0x80;
-    } else if first >= 0xE0 && first <= 0xEF {
+    }
+    else if first >= 0xE0 && first <= 0xEF {
         remaining = 2;
         codepoint = cast(u32)(first & 0x0F);
         minimum = 0x800;
-    } else if first >= 0xF0 && first <= 0xF4 {
+    }
+    else if first >= 0xF0 && first <= 0xF4 {
         remaining = 3;
         codepoint = cast(u32)(first & 0x07);
         minimum = 0x10000;
@@ -281,17 +292,23 @@ json_quoted :: (p: *JsonParser, decode: bool = true) -> string {
         codepoint: u32;
         if escape == #char "\"" || escape == #char "\\" || escape == #char "/" {
             codepoint = escape;
-        } else if escape == #char "b" {
+        }
+        else if escape == #char "b" {
             codepoint = #char "\x08";
-        } else if escape == #char "f" {
+        }
+        else if escape == #char "f" {
             codepoint = #char "\x0C";
-        } else if escape == #char "n" {
+        }
+        else if escape == #char "n" {
             codepoint = #char "\n";
-        } else if escape == #char "r" {
+        }
+        else if escape == #char "r" {
             codepoint = #char "\r";
-        } else if escape == #char "t" {
+        }
+        else if escape == #char "t" {
             codepoint = #char "\t";
-        } else if escape == #char "u" {
+        }
+        else if escape == #char "u" {
             codepoint = json_hex_quad(p);
             if codepoint >= 0xD800 && codepoint <= 0xDBFF {
                 if (p.cursor + 2 > p.text.count || p.text[p.cursor] != #char "\\" ||
@@ -306,7 +323,8 @@ json_quoted :: (p: *JsonParser, decode: bool = true) -> string {
                     return "";
                 }
                 codepoint = 0x10000 + ((codepoint - 0xD800) << 10) + low - 0xDC00;
-            } else if codepoint >= 0xDC00 && codepoint <= 0xDFFF {
+            }
+            else if codepoint >= 0xDC00 && codepoint <= 0xDFFF {
                 p.error = true;
             }
         } else {
@@ -419,13 +437,17 @@ json_skip_value :: (p: *JsonParser, depth: int) {
                 return;
             }
         }
-    } else if ch == #char "\"" {
+    }
+    else if ch == #char "\"" {
         json_quoted(p, false);
-    } else if ch == #char "t" {
+    }
+    else if ch == #char "t" {
         p.error = !json_literal(p, "true");
-    } else if ch == #char "f" {
+    }
+    else if ch == #char "f" {
         p.error = !json_literal(p, "false");
-    } else if ch == #char "n" {
+    }
+    else if ch == #char "n" {
         p.error = !json_literal(p, "null");
     } else {
         json_number_token(p);
@@ -516,9 +538,51 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
         p.error = true;
         return;
     }
+    if info == type_info(JsonMath.Color) {
+        hex := json_quoted(p);
+        if (hex.count != 7 && hex.count != 9) || !JsonMath.is_valid_hex_color(json_slice(hex, 0, 7)) {
+            p.error = true;
+            return;
+        }
+        color := JsonMath.color_from_hex(json_slice(hex, 0, 7));
+        if hex.count == 9 {
+            alpha := json_slice(hex, 7, 9);
+            for ch: alpha {
+                if !((ch >= #char "0" && ch <= #char "9") || (ch >= #char "A" && ch <= #char "F") ||
+                     (ch >= #char "a" && ch <= #char "f")) {
+                    p.error = true;
+                    return;
+                }
+            }
+            color.a = JsonMath.int_from_hex_char_for_colors(alpha[0]) * 16 + JsonMath.int_from_hex_char_for_colors(alpha[1]);
+        }
+        (cast(*JsonMath.Color)dest).* = color;
+        return;
+    }
+    if info == type_info(JsonMath.Vec4) {
+        json_space(p);
+        if p.cursor < p.text.count && p.text[p.cursor] == #char "\"" {
+            hex := json_quoted(p);
+            if !JsonMath.is_valid_hex_color(hex) {
+                p.error = true;
+                return;
+            }
+            (cast(*JsonMath.Vec4)dest).* = JsonMath.linear_from_hex(hex);
+            return;
+        }
+        json_read_value(p, type_info([4]float), dest, depth + 1, structures);
+        return;
+    }
+    for codec: p.codecs {
+        if cast(*Type_Info)codec.value_type == info {
+            codec.read(p, dest, depth, structures);
+            return;
+        }
+    }
     if info.type == .STRING {
         (cast(*string)dest).* = json_quoted(p);
-    } else if info.type == .STRUCT {
+    }
+    else if info.type == .STRUCT {
         if !json_take(p, #char "{") {
             return;
         }
@@ -572,7 +636,8 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
                 return;
             }
         }
-    } else if info.type == .ARRAY {
+    }
+    else if info.type == .ARRAY {
         array := cast(*Type_Info_Array)info;
         if array.array_type != .FIXED || !json_take(p, #char "[") {
             p.error = true;
@@ -585,7 +650,8 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
             json_read_value(p, array.element_type, dest + index * array.element_type.runtime_size, depth + 1, structures);
         }
         json_take(p, #char "]");
-    } else if info.type == .ENUM {
+    }
+    else if info.type == .ENUM {
         value := json_quoted(p);
         enumeration := cast(*Type_Info_Enum)info;
         for name, index: enumeration.names {
@@ -596,15 +662,18 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
             }
         }
         p.error = true;
-    } else if info.type == .BOOL {
+    }
+    else if info.type == .BOOL {
         if json_literal(p, "true") {
             (cast(*bool)dest).* = true;
-        } else if json_literal(p, "false") {
+        }
+        else if json_literal(p, "false") {
             (cast(*bool)dest).* = false;
         } else {
             p.error = true;
         }
-    } else if info.type == .INTEGER {
+    }
+    else if info.type == .INTEGER {
         token := json_number_token(p);
         if p.error {
             return;
@@ -622,7 +691,8 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
             if !negative {
                 limit -= 1;
             }
-        } else if bits < 64 {
+        }
+        else if bits < 64 {
             limit = ((cast(u64)1) << bits) - 1;
         }
         if !valid || magnitude > limit || (negative && magnitude != 0 && !integer.signed) {
@@ -634,7 +704,8 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
             representation = (~magnitude) + 1;
         }
         memcpy(dest, *representation, info.runtime_size);
-    } else if info.type == .FLOAT {
+    }
+    else if info.type == .FLOAT {
         token := json_number_token(p);
         if p.error {
             return;
@@ -646,7 +717,8 @@ json_read_value :: (p: *JsonParser, info: *Type_Info, dest: *u8, depth: int, str
         }
         if info.runtime_size == size_of(float64) {
             (cast(*float64)dest).* = value;
-        } else if info.runtime_size == size_of(float32) && JsonMath.is_finite(cast(float32)value) {
+        }
+        else if info.runtime_size == size_of(float32) && JsonMath.is_finite(cast(float32)value) {
             (cast(*float32)dest).* = cast(float32)value;
         } else {
             p.error = true;

@@ -2,7 +2,6 @@
 #scope_file
 
 #import "Basic";
-Files :: #import "File";
 Tables :: #import "Hash_Table";
 using,only(for_expansion) Tables;
 Events :: #import "MyEvents";
@@ -18,11 +17,22 @@ ConfigEventType :: enum {
     Error;
 }
 
-// Opaque modification token: only equality is used, so clocks may move backwards.
 ConfigManagerTime :: s64;
 Config_Read_Callback :: #type (path: string) -> (text: string, success: bool);
 Config_Write_Callback :: #type (path: string, text: string) -> bool;
-Config_Time_Callback :: #type (path: string) -> (time: ConfigManagerTime, success: bool);
+
+ConfigSourceState :: enum {
+    Available;
+    Unavailable;
+    Unwatched;
+}
+Config_Time_Callback :: #type (path: string) -> (time: ConfigManagerTime, state: ConfigSourceState);
+
+ConfigValue :: struct {
+    key: string;
+    data: *void;
+}
+Config_Validation_Callback :: #type (config_type: Type, values: []ConfigValue) -> bool;
 
 ConfigManager :: struct {
     configs: [..]*ConfigRegistration;
@@ -36,6 +46,8 @@ ConfigManager :: struct {
     // Borrows text for the call. A failed write must leave the destination unchanged.
     write_config_callback: Config_Write_Callback = write_config_file;
 
+    validate_configs_callback: Config_Validation_Callback;
+
     // Without a time callback, loading is explicit; polling does no work.
     get_last_config_change_time_callback: Config_Time_Callback;
 
@@ -43,20 +55,8 @@ ConfigManager :: struct {
     busy: bool;
 }
 
-// Each type is registered once. Parsers receive an inner JSON value initialized to T's defaults.
-// Custom parsers may borrow strings from text, but must not retain temporary allocations.
-// Set legacy_single_value only at a compatibility boundary for old unkeyed JSON files.
-// watch enables polling; writer overrides the value encoder; writable permits saves/default initialization.
-register_config :: (manager: *ConfigManager,
-                    $T: Type,
-                    path: string,
-                    parser: #type (text: string, dest: *T) -> bool = null,
-                    watch: bool = true,
-                    legacy_single_value: bool = false,
-                    required_key: string = "",
-                    writer: #type (builder: *String_Builder, value: *T, depth: int) -> bool = null,
-                    writable: bool = true) -> bool
-{
+// Registration binds a type to its source. Serialization is always module-owned.
+register_config :: (manager: *ConfigManager, $T: Type, path: string) -> bool {
     if manager.busy || path.count == 0 || is_config_registered(manager, T) {
         return false;
     }
@@ -69,14 +69,8 @@ register_config :: (manager: *ConfigManager,
     registration := New(TypedConfig(T));
     registration.base.config_type = T;
     registration.base.path = sprint("%", path);
-    registration.base.required_key = sprint("%", required_key);
-    registration.base.watch = watch;
-    registration.base.writable = writable;
-    registration.base.legacy_single_value = legacy_single_value;
     registration.base.populate = TypedConfig(T).populate;
     registration.base.release = TypedConfig(T).release;
-    registration.parser = parser;
-    registration.writer = writer;
     array_add(*manager.configs, *registration.base);
     return true;
 }
@@ -85,9 +79,18 @@ is_config_registered :: (manager: *ConfigManager, $T: Type) -> bool {
     return find_registration(manager, T) != null;
 }
 
-// Results and borrowed strings remain valid until this type successfully reloads or shutdown.
-// A failed reload preserves values and addresses. Missing keys/types return null.
-get_config :: (manager: *ConfigManager, $T: Type, key: string = "default") -> *T {
+// Structs may override the conventional default with a DEFAULT_KEY string constant.
+default_config_key :: ($T: Type) -> string {
+    key :: #run config_default_key_info(type_info(T));
+    return key;
+}
+
+// Borrowed values remain valid until successful reload/save or shutdown; failure preserves them.
+get_config :: (manager: *ConfigManager, $T: Type) -> *T {
+    return get_config(manager, T, default_config_key(T));
+}
+
+get_config :: (manager: *ConfigManager, $T: Type, key: string) -> *T {
     values := get_configs(manager, T);
     if !values {
         return null;
@@ -106,7 +109,11 @@ get_configs :: (manager: *ConfigManager, $T: Type) -> *Tables.Table(string, T) {
 }
 
 // Original inner JSON, including comments, with the same lifetime as get_config's result.
-get_config_source :: (manager: *ConfigManager, $T: Type, key: string = "default") -> string {
+get_config_source :: (manager: *ConfigManager, $T: Type) -> string {
+    return get_config_source(manager, T, default_config_key(T));
+}
+
+get_config_source :: (manager: *ConfigManager, $T: Type, key: string) -> string {
     base := find_registration(manager, T);
     if !base {
         return "";
@@ -175,10 +182,11 @@ check_and_perform_config_reloads :: (manager: *ConfigManager) -> int {
     push_allocator(allocator);
     reloaded: int;
     for registration: manager.configs {
-        if !registration.watch {
+        stamp, state := manager.get_last_config_change_time_callback(registration.path);
+        if state == .Unwatched {
             continue;
         }
-        stamp, available := manager.get_last_config_change_time_callback(registration.path);
+        available := state == .Available;
         changed := (!registration.observed || available != registration.observed_available ||
                     (available && stamp != registration.observed_time));
         if !changed {
@@ -221,10 +229,6 @@ shutdown :: (manager: *ConfigManager) {
 ConfigRegistration :: struct {
     config_type: Type;
     path: string;
-    required_key: string;
-    watch: bool;
-    writable: bool;
-    legacy_single_value: bool;
     loaded: bool;
     // Borrows the current storage. A save is verified on the next poll without rebroadcasting identical bytes.
     loaded_source: string;
@@ -247,25 +251,25 @@ ConfigStorage :: struct (T: Type) {
 TypedConfig :: struct (T: Type) {
     // Must be first: erased registrations are cast back to their concrete typed storage.
     base: ConfigRegistration;
-    parser: #type (text: string, dest: *T) -> bool;
-    writer: #type (builder: *String_Builder, value: *T, depth: int) -> bool;
     storage: ConfigStorage(T);
 
     populate :: (manager: *ConfigManager, base: *ConfigRegistration, owned_text: string) -> bool {
         registration := cast(*TypedConfig(T))base;
         candidate: ConfigStorage(T);
-        if base.writable && json_is_empty_config(owned_text) {
+        if json_is_empty_config(owned_text) {
             free(owned_text);
             value := New(T);
             defer free(value);
-            key := ifx base.required_key.count > 0 then base.required_key else "default";
+            json_clone_containers(T, value);
+            key := default_config_key(T);
             inline Tables.table_add(*candidate.values, key, value.*);
             candidate.needs_defaults_saved = true;
-        } else if !decode_storage(registration, *candidate, owned_text, base.legacy_single_value) {
+        }
+        else if !decode_storage(manager, registration, *candidate, owned_text) {
             report_error(manager, base, "invalid JSON, config value, duplicate key or missing required key");
             return false;
         }
-        if base.writable && candidate.needs_defaults_saved {
+        if candidate.needs_defaults_saved {
             defer release_storage(*candidate);
             return save_config_storage(manager, registration, *candidate, "", null);
         }
@@ -280,13 +284,12 @@ TypedConfig :: struct (T: Type) {
         registration := cast(*TypedConfig(T))base;
         release_storage(*registration.storage);
         free(base.path);
-        free(base.required_key);
         free(registration);
     }
 }
 
 // Consumes owned_text on either result. On success the caller owns candidate until publication.
-decode_storage :: (registration: *TypedConfig($T), candidate: *ConfigStorage(T), owned_text: string, allow_legacy: bool) -> bool {
+decode_storage :: (manager: *ConfigManager, registration: *TypedConfig($T), candidate: *ConfigStorage(T), owned_text: string) -> bool {
     base := *registration.base;
     candidate.source = owned_text;
     entries: [..]JsonEntry;
@@ -302,12 +305,9 @@ decode_storage :: (registration: *TypedConfig($T), candidate: *ConfigStorage(T),
                 break;
             }
             Initialize(value);
-            if registration.parser {
-                success = registration.parser(entry.value, value);
-            } else {
-                success = json_decode(entry.value, T, value, *candidate.strings);
-            }
+            success = json_decode(entry.value, T, value, *candidate.strings);
             if !success {
+                json_release(T, value);
                 break;
             }
             inline Tables.table_add(*candidate.values, entry.key, value.*);
@@ -317,27 +317,13 @@ decode_storage :: (registration: *TypedConfig($T), candidate: *ConfigStorage(T),
             }
         }
     }
-    if success && base.required_key.count > 0 {
-        success = Tables.table_contains(*candidate.values, base.required_key);
-    }
-    if !success && allow_legacy {
-        candidate.source = "";
-        release_storage(candidate);
-        candidate.* = .{};
-        candidate.source = owned_text;
-        Initialize(value);
-        if registration.parser {
-            success = registration.parser(owned_text, value);
-        } else {
-            success = json_decode(owned_text, T, value, *candidate.strings);
+    if success && manager.validate_configs_callback {
+        values: [..]ConfigValue;
+        defer array_free(values);
+        for *item, key: candidate.values {
+            array_add(*values, ConfigValue.{key, item});
         }
-        if success {
-            inline Tables.table_add(*candidate.values, "default", value.*);
-            Tables.table_add(*candidate.sources, "default", owned_text);
-        }
-    }
-    if success && base.required_key.count > 0 {
-        success = Tables.table_contains(*candidate.values, base.required_key);
+        success = manager.validate_configs_callback(T, values);
     }
     if !success {
         release_storage(candidate);
@@ -373,10 +359,6 @@ save_config_storage :: (manager: *ConfigManager,
                         replacement: *T) -> bool
 {
     base := *registration.base;
-    if !base.writable {
-        report_error(manager, base, "registration is read-only");
-        return false;
-    }
     if !manager.write_config_callback {
         report_error(manager, base, "no config writer supplied");
         return false;
@@ -411,7 +393,7 @@ save_config_storage :: (manager: *ConfigManager,
     // Build the document once, then validate it once to establish owned keys/strings and domain checks.
     text := builder_to_string(*builder);
     candidate: ConfigStorage(T);
-    if !decode_storage(registration, *candidate, text, false) {
+    if !decode_storage(manager, registration, *candidate, text) {
         report_error(manager, base, "serialized config failed validation");
         return false;
     }
@@ -445,11 +427,7 @@ write_config_entry :: (registration: *TypedConfig($T),
         return false;
     }
     append(builder, ": ");
-    if registration.writer {
-        if !registration.writer(builder, value, 1) {
-            return false;
-        }
-    } else if !json_write_value(builder, T, value, 1) {
+    if !json_write_value(builder, T, value, 1) {
         return false;
     }
     if trailing_comma {
@@ -463,6 +441,9 @@ write_config_entry :: (registration: *TypedConfig($T),
 }
 
 release_storage :: (storage: *ConfigStorage($T)) {
+    for *value: storage.values {
+        json_release(T, value);
+    }
     Tables.deinit(*storage.values);
     Tables.deinit(*storage.sources);
     for text: storage.strings {
@@ -482,15 +463,25 @@ find_registration :: (manager: *ConfigManager, config_type: Type) -> *ConfigRegi
 }
 
 read_config_file :: (path: string) -> string, bool {
-    text, success := Files.read_entire_file(path, false, false);
-    return text, success;
+    #if OS == .WINDOWS || OS == .LINUX || OS == .MACOS || OS == .ANDROID {
+        Files :: #import "File";
+        text, success := Files.read_entire_file(path, false, false);
+        return text, success;
+    }
+    else {
+        print("MyConfig: file reading is unsupported on %. Set manager.read_config_callback for '%'.\n", OS, path);
+        return "", false;
+    }
 }
 
 observe_config :: (manager: *ConfigManager, registration: *ConfigRegistration) {
-    if registration.watch && manager.get_last_config_change_time_callback {
-        stamp, available := manager.get_last_config_change_time_callback(registration.path);
+    if manager.get_last_config_change_time_callback {
+        stamp, state := manager.get_last_config_change_time_callback(registration.path);
+        if state == .Unwatched {
+            return;
+        }
         registration.observed = true;
-        registration.observed_available = available;
+        registration.observed_available = state == .Available;
         registration.observed_time = stamp;
     }
 }
@@ -515,7 +506,7 @@ load_registration :: (manager: *ConfigManager, registration: *ConfigRegistration
             return false;
         }
     }
-    
+
     if !registration.populate(manager, registration, text) {
         return false;
     }
@@ -535,4 +526,22 @@ report_error :: (manager: *ConfigManager, registration: *ConfigRegistration, mes
     registration.verify_saved_source = false;
     print("Config % (%): %. Keeping the last valid values.\n", registration.config_type, registration.path, message);
     Events.broadcast(*manager.config_changed, registration.config_type, ConfigEventType.Error);
+}
+
+config_default_key_info :: (info: *Type_Info) -> string #compile_time {
+    if info.type == .STRUCT {
+        structure := cast(*Type_Info_Struct)info;
+        for member: structure.members {
+            if member.name == "DEFAULT_KEY" {
+                if member.flags & .CONSTANT && member.type == type_info(string) {
+                    return (cast(*string)(structure.constant_storage.data + member.offset_into_constant_storage)).*;
+                }
+                else {
+                    print("MyConfig: Structure '%' declares DEFAULT_KEY, but it is not a string constant. Using 'default'.\n", structure.name);
+                }
+            }
+        }
+    }
+
+    return "default";
 }

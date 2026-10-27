@@ -5,7 +5,6 @@
 #scope_file
 
 #import "Basic";
-Files :: #import "File";
 
 #scope_export
 
@@ -23,37 +22,37 @@ write_config_file :: (path: string, text: string) -> bool {
 
 #scope_file
 
-FileUtilities :: #import "File_Utilities";
-
 #if OS == .WINDOWS {
-    ConfigWindows :: #import "Windows";
-    ConfigWindowsUtf8 :: #import "Windows_Utf8";
+    Files :: #import "File";
+    FileUtilities :: #import "File_Utilities";
+    Win32 :: #import "Windows";
+    Win32UTF8 :: #import "Windows_Utf8";
     CONFIG_TEMP_ATTEMPTS :: 64;
     CONFIG_WRITE_BLOCK_BYTES :: 1048576;
     WINDOWS_ERROR_FILE_EXISTS :: 80;
 
     write_config_file_atomic :: (path: string, text: string) -> bool {
         counter: s64;
-        if !ConfigWindows.QueryPerformanceCounter(*counter) {
+        if !Win32.QueryPerformanceCounter(*counter) {
             return false;
         }
-        process_id := ConfigWindows.GetCurrentProcessId();
+        process_id := Win32.GetCurrentProcessId();
         for attempt: 0..CONFIG_TEMP_ATTEMPTS - 1 {
             temporary_path := sprint("%.config_tmp_%_%_%", path, process_id, counter, attempt);
             defer free(temporary_path);
-            wide_path, converted := ConfigWindowsUtf8.utf8_to_wide(temporary_path);
+            wide_path, converted := Win32UTF8.utf8_to_wide(temporary_path);
             if !converted {
                 return false;
             }
             defer free(wide_path);
-            handle := ConfigWindows.CreateFileW(wide_path,
-                                                ConfigWindows.FILE_GENERIC_WRITE,
+            handle := Win32.CreateFileW(wide_path,
+                                                Win32.FILE_GENERIC_WRITE,
                                                 0,
-                                                creation = ConfigWindows.CREATE_NEW,
-                                                flags_and_attributes = ConfigWindows.FILE_ATTRIBUTE_NORMAL);
-            if handle == ConfigWindows.INVALID_HANDLE_VALUE {
-                error := ConfigWindows.GetLastError();
-                if error == WINDOWS_ERROR_FILE_EXISTS || error == ConfigWindows.ERROR_ALREADY_EXISTS {
+                                                creation = Win32.CREATE_NEW,
+                                                flags_and_attributes = Win32.FILE_ATTRIBUTE_NORMAL);
+            if handle == Win32.INVALID_HANDLE_VALUE {
+                error := Win32.GetLastError();
+                if error == WINDOWS_ERROR_FILE_EXISTS || error == Win32.ERROR_ALREADY_EXISTS {
                     continue;
                 }
                 return false;
@@ -62,7 +61,7 @@ FileUtilities :: #import "File_Utilities";
             committed: bool;
             defer {
                 if !closed {
-                    ConfigWindows.CloseHandle(handle);
+                    Win32.CloseHandle(handle);
                 }
                 if !committed {
                     Files.file_delete(temporary_path);
@@ -73,16 +72,16 @@ FileUtilities :: #import "File_Utilities";
                 remaining := text.count - written;
                 requested := cast(u32)(ifx remaining > CONFIG_WRITE_BLOCK_BYTES then CONFIG_WRITE_BLOCK_BYTES else remaining);
                 amount: u32;
-                success := ConfigWindows.WriteFile(handle, text.data + written, requested, *amount, null);
+                success := Win32.WriteFile(handle, text.data + written, requested, *amount, null);
                 if !success || amount == 0 {
                     return false;
                 }
                 written += amount;
             }
-            if !ConfigWindows.FlushFileBuffers(handle) {
+            if !Win32.FlushFileBuffers(handle) {
                 return false;
             }
-            closed = ConfigWindows.CloseHandle(handle) != 0;
+            closed = Win32.CloseHandle(handle) != 0;
             if !closed {
                 return false;
             }
@@ -91,7 +90,8 @@ FileUtilities :: #import "File_Utilities";
         }
         return false;
     }
-} else #if OS_IS_UNIX {
+}
+else #if OS == .LINUX || OS == .MACOS || OS == .ANDROID {
     ConfigPosix :: #import "POSIX";
 
     write_config_file_atomic :: (path: string, text: string) -> bool {
@@ -109,7 +109,7 @@ FileUtilities :: #import "File_Utilities";
                 ConfigPosix.close(descriptor);
             }
             if !committed {
-                Files.file_delete(temporary_path);
+                ConfigPosix.unlink(temp_c_string(temporary_path));
             }
         }
         written: int;
@@ -128,13 +128,14 @@ FileUtilities :: #import "File_Utilities";
         if !closed {
             return false;
         }
-        committed = FileUtilities.atomic_file_replace_or_just_rename_if_destination_file_does_not_exist(temporary_path, path);
+        committed = ConfigPosix.rename(temp_c_string(temporary_path), temp_c_string(path)) == 0;
         return committed;
     }
-} else {
+}
+else {
     // Supply a platform writer callback on targets without an exclusive temporary-file API.
     write_config_file_atomic :: (path: string, text: string) -> bool {
-        assert(false, "TODO:");
+        print("MyConfig: safe file replacement is unsupported on %. Set manager.write_config_callback for '%'.\n", OS, path);
         return false;
     }
 }
